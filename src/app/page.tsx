@@ -86,12 +86,11 @@ export default function Home() {
                     id="packageUrl"
                     value={packageUrl}
                     onChange={(e) => setPackageUrl(e.target.value)}
-                    placeholder="https://example.com/scorm-package.zip or https://example.com/scorm-content/ or https://example.com/scorm-content/imsmanifest.xml"
+                    placeholder="https://example.com/scorm-content/imsmanifest.xml"
                     className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                   <p className="mt-1 text-sm text-gray-500">
-                    Enter the URL of a SCORM package (.zip file), hosted SCORM
-                    content directory, or direct manifest URL
+                    Enter the URL of imsmanifest.xml file
                   </p>
                 </div>
 
