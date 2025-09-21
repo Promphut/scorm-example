@@ -44,9 +44,11 @@ export class SCORMParser {
 
       onProgress?.(10);
 
-      // Check if URL points to a zip file or hosted content
-      if (this.isZipFile(url)) {
-        // Handle zip file loading
+      // Try to determine the content type with a HEAD request
+      const isZip = await this.detectZipFromUrl(url);
+      
+      if (isZip) {
+        // Handle zip file loading (with fallback to hosted content)
         return await this.loadFromZipUrl(url, onProgress);
       } else {
         // Handle hosted content loading
@@ -65,47 +67,54 @@ export class SCORMParser {
   ): Promise<SCORMPackage> {
     console.log(`[SCORMParser] Loading from zip file: ${url}`);
 
-    // Fetch the file with progress tracking
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(
-        `Failed to fetch SCORM package: ${response.status} ${response.statusText}`
+    try {
+      // Fetch the file with progress tracking
+      const response = await fetch(url);
+      if (!response.ok) {
+        // If zip fetch fails, try as hosted content instead
+        console.log(`[SCORMParser] Zip fetch failed (${response.status}), trying as hosted content`);
+        return await this.loadFromHostedUrl(url, onProgress);
+      }
+
+      // Check content type to verify it's actually a zip
+      const contentType = response.headers.get("content-type");
+      const isZipContent = contentType && (
+        contentType.includes("application/zip") ||
+        contentType.includes("application/x-zip-compressed") ||
+        contentType.includes("application/octet-stream")
       );
-    }
 
-    // Check content type
-    const contentType = response.headers.get("content-type");
-    if (
-      contentType &&
-      !contentType.includes("application/zip") &&
-      !contentType.includes("application/octet-stream")
-    ) {
-      console.warn(
-        `Unexpected content type: ${contentType}. Proceeding anyway...`
+      if (!isZipContent && contentType) {
+        console.log(`[SCORMParser] Content-Type indicates non-zip content (${contentType}), trying as hosted content`);
+        return await this.loadFromHostedUrl(url, onProgress);
+      }
+
+      onProgress?.(30);
+
+      // Get content length for progress tracking
+      const contentLength = response.headers.get("content-length");
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+      // Read the response with progress tracking
+      const arrayBuffer = await this.readResponseWithProgress(
+        response,
+        total,
+        onProgress
       );
+
+      onProgress?.(70);
+
+      // Parse the SCORM package
+      const packageData = await this.loadFromArrayBuffer(arrayBuffer, url);
+
+      onProgress?.(100);
+
+      return packageData;
+    } catch (error) {
+      // If zip parsing fails, try as hosted content
+      console.log(`[SCORMParser] Zip loading failed, trying as hosted content:`, error);
+      return await this.loadFromHostedUrl(url, onProgress);
     }
-
-    onProgress?.(30);
-
-    // Get content length for progress tracking
-    const contentLength = response.headers.get("content-length");
-    const total = contentLength ? parseInt(contentLength, 10) : 0;
-
-    // Read the response with progress tracking
-    const arrayBuffer = await this.readResponseWithProgress(
-      response,
-      total,
-      onProgress
-    );
-
-    onProgress?.(70);
-
-    // Parse the SCORM package
-    const packageData = await this.loadFromArrayBuffer(arrayBuffer, url);
-
-    onProgress?.(100);
-
-    return packageData;
   }
 
   private async loadFromHostedUrl(
@@ -405,6 +414,8 @@ export class SCORMParser {
       itemElement.identifier || itemElement.$?.identifier || "";
     const identifierref =
       itemElement.identifierref || itemElement.$?.identifierref;
+    const isvisible = itemElement.isvisible !== "false"; // Default to true
+    const parameters = itemElement.parameters || itemElement.$?.parameters;
     const items: SCORMItem[] = [];
 
     let subItemsElement = itemElement.item;
@@ -421,11 +432,29 @@ export class SCORMParser {
       }
     }
 
+    // Extract sequencing information (SCORM 2004)
+    const sequencing = this.extractSequencing(itemElement.sequencing || itemElement["imsss:sequencing"]);
+    
+    // Extract presentation information
+    const presentation = this.extractPresentation(itemElement.presentation);
+
+    // Extract mastery score and time limits
+    const mastery_score = itemElement.mastery_score ? parseFloat(itemElement.mastery_score) : undefined;
+    const max_time_allowed = itemElement.max_time_allowed || itemElement.maxtimeallowed;
+    const time_limit_action = itemElement.time_limit_action || itemElement.timelimitaction;
+
     return {
       identifier,
       title: this.extractTitle(itemElement),
       identifierref,
+      isvisible,
+      parameters,
       item: items.length > 0 ? items : undefined,
+      sequencing,
+      presentation,
+      mastery_score,
+      max_time_allowed,
+      time_limit_action,
     };
   }
 
@@ -436,7 +465,10 @@ export class SCORMParser {
     const type = resourceElement.type || resourceElement.$?.type || "";
     const href = resourceElement.href || resourceElement.$?.href || "";
     const base = resourceElement.base || resourceElement.$?.base;
+    const scormType = resourceElement.scormtype || resourceElement["adlcp:scormtype"];
+    const xmlBase = resourceElement.xmlbase || resourceElement["xml:base"];
     const files: SCORMFile[] = [];
+    const dependencies: any[] = [];
 
     let filesElement = resourceElement.file;
     if (!filesElement && resourceElement["ims:file"]) {
@@ -449,9 +481,29 @@ export class SCORMParser {
         : [filesElement];
       for (const file of fileArray) {
         const fileHref = file.href || file.$?.href || "";
+        const metadata = file.metadata;
         files.push({
           href: fileHref,
+          metadata: metadata ? this.extractMetadata(metadata) : undefined,
         });
+      }
+    }
+
+    // Extract dependencies
+    let dependencyElement = resourceElement.dependency;
+    if (!dependencyElement && resourceElement["ims:dependency"]) {
+      dependencyElement = resourceElement["ims:dependency"];
+    }
+
+    if (dependencyElement) {
+      const depArray = Array.isArray(dependencyElement)
+        ? dependencyElement
+        : [dependencyElement];
+      for (const dep of depArray) {
+        const identifierref = dep.identifierref || dep.$?.identifierref;
+        if (identifierref) {
+          dependencies.push({ identifierref });
+        }
       }
     }
 
@@ -460,7 +512,10 @@ export class SCORMParser {
       type,
       href,
       base,
+      scormType: scormType as "sco" | "asset" | undefined,
+      xmlBase,
       files,
+      dependencies: dependencies.length > 0 ? dependencies : undefined,
     };
   }
 
@@ -760,14 +815,47 @@ export class SCORMParser {
     packageData: SCORMPackage,
     resourcePath: string
   ): string {
+    if (!resourcePath || resourcePath.trim() === "") {
+      console.warn("[SCORMParser] Empty resource path provided");
+      return "";
+    }
+
+    // Normalize the resource path
+    const normalizedPath = resourcePath.replace(/\\/g, '/').trim();
+    
     if (packageData.baseUrl) {
       // For hosted content, construct the full URL
       const baseUrl = packageData.baseUrl.endsWith("/")
         ? packageData.baseUrl
         : packageData.baseUrl + "/";
-      return `${baseUrl}${resourcePath}`;
+
+      // Handle relative paths properly - remove leading slash and dot-slash
+      let cleanPath = normalizedPath;
+      if (cleanPath.startsWith("/")) {
+        cleanPath = cleanPath.substring(1);
+      }
+      if (cleanPath.startsWith("./")) {
+        cleanPath = cleanPath.substring(2);
+      }
+      
+      const fullUrl = `${baseUrl}${cleanPath}`;
+
+      console.log(
+        `[SCORMParser] Generated URL: ${fullUrl} from base: ${baseUrl} and path: ${resourcePath}`
+      );
+      
+      // Validate the generated URL
+      try {
+        new URL(fullUrl);
+        return fullUrl;
+      } catch (error) {
+        console.error(`[SCORMParser] Invalid URL generated: ${fullUrl}`, error);
+        return "";
+      }
     }
-    return resourcePath;
+
+    // For local content, return normalized path
+    return normalizedPath;
   }
 
   // Helper methods for URL validation and progress tracking
@@ -778,6 +866,31 @@ export class SCORMParser {
     } catch {
       return false;
     }
+  }
+
+  private async detectZipFromUrl(url: string): Promise<boolean> {
+    // First check URL patterns
+    if (this.isZipFile(url)) {
+      return true;
+    }
+
+    // Try a HEAD request to check content type
+    try {
+      const response = await fetch(url, { method: 'HEAD' });
+      if (response.ok) {
+        const contentType = response.headers.get('content-type');
+        if (contentType) {
+          return contentType.includes('application/zip') || 
+                 contentType.includes('application/x-zip-compressed') ||
+                 contentType.includes('application/octet-stream');
+        }
+      }
+    } catch (error) {
+      console.log(`[SCORMParser] HEAD request failed for ${url}:`, error);
+    }
+
+    // Default to hosted content approach
+    return false;
   }
 
   private isManifestUrl(url: string): boolean {
@@ -803,14 +916,17 @@ export class SCORMParser {
       return true;
     }
 
-    // For URLs without explicit .zip extension, we'll be more permissive
-    // and let the actual content validation handle it
-    // This allows for URLs like:
-    // - https://example.com/scorm-package (no extension)
-    // - https://example.com/download/scorm-package
-    // - https://example.com/api/scorm/123/download
+    // If URL ends with manifest file names, it's definitely not a zip
+    if (this.isManifestUrl(url)) {
+      return false;
+    }
 
-    // Only reject obvious non-zip files
+    // If URL ends with a slash, it's likely a directory
+    if (urlLower.endsWith("/")) {
+      return false;
+    }
+
+    // Check for obvious non-zip extensions
     const nonZipExtensions = [
       ".pdf",
       ".doc",
@@ -829,8 +945,9 @@ export class SCORMParser {
       }
     }
 
-    // If no obvious non-zip extension, assume it could be a zip file
-    return true;
+    // For ambiguous URLs, try to determine based on response headers
+    // For now, default to false to prefer hosted content approach
+    return false;
   }
 
   private async readResponseWithProgress(
@@ -876,5 +993,278 @@ export class SCORMParser {
     }
 
     return result.buffer;
+  }
+
+  // Sequencing extraction methods for SCORM 2004
+  private extractSequencing(sequencingElement: any): any {
+    if (!sequencingElement) {
+      return undefined;
+    }
+
+    return {
+      id: sequencingElement.id || sequencingElement.$?.id,
+      controlMode: this.extractControlMode(sequencingElement.controlmode || sequencingElement.controlMode),
+      sequencingRules: this.extractSequencingRules(sequencingElement.sequencingrules || sequencingElement.sequencingRules),
+      limitConditions: this.extractLimitConditions(sequencingElement.limitconditions || sequencingElement.limitConditions),
+      auxiliaryResources: this.extractAuxiliaryResources(sequencingElement.auxiliaryresources || sequencingElement.auxiliaryResources),
+      rollupRules: this.extractRollupRules(sequencingElement.rolluprules || sequencingElement.rollupRules),
+      objectives: this.extractObjectives(sequencingElement.objectives),
+      randomizationControls: this.extractRandomizationControls(sequencingElement.randomizationcontrols || sequencingElement.randomizationControls),
+      deliveryControls: this.extractDeliveryControls(sequencingElement.deliverycontrols || sequencingElement.deliveryControls),
+      constrainedChoiceConsiderations: this.extractConstrainedChoiceConsiderations(sequencingElement.constrainedchoiceconsiderations),
+      rollupConsiderations: this.extractRollupConsiderations(sequencingElement.rollupconsiderations),
+    };
+  }
+
+  private extractControlMode(controlModeElement: any): any {
+    if (!controlModeElement) {
+      return undefined;
+    }
+
+    return {
+      choice: this.parseBoolean(controlModeElement.choice),
+      choiceExit: this.parseBoolean(controlModeElement.choiceexit || controlModeElement.choiceExit),
+      flow: this.parseBoolean(controlModeElement.flow),
+      forwardOnly: this.parseBoolean(controlModeElement.forwardonly || controlModeElement.forwardOnly),
+      useCurrentAttemptObjectiveInfo: this.parseBoolean(controlModeElement.usecurrentattemptobjectiveinfo),
+      useCurrentAttemptProgressInfo: this.parseBoolean(controlModeElement.usecurrentattemptprogressinfo),
+    };
+  }
+
+  private extractSequencingRules(rulesElement: any): any {
+    if (!rulesElement) {
+      return undefined;
+    }
+
+    return {
+      preConditionRule: this.extractRules(rulesElement.preconditionrule || rulesElement.preConditionRule),
+      exitConditionRule: this.extractRules(rulesElement.exitconditionrule || rulesElement.exitConditionRule),
+      postConditionRule: this.extractRules(rulesElement.postconditionrule || rulesElement.postConditionRule),
+    };
+  }
+
+  private extractRules(rulesElement: any): any[] {
+    if (!rulesElement) {
+      return [];
+    }
+
+    const rulesArray = Array.isArray(rulesElement) ? rulesElement : [rulesElement];
+    return rulesArray.map(rule => ({
+      conditionCombination: rule.conditioncombination || rule.conditionCombination || "all",
+      action: rule.action,
+      ruleConditions: this.extractRuleConditions(rule.ruleconditions || rule.ruleConditions),
+    }));
+  }
+
+  private extractRuleConditions(conditionsElement: any): any[] {
+    if (!conditionsElement) {
+      return [];
+    }
+
+    const conditionArray = Array.isArray(conditionsElement) ? conditionsElement : [conditionsElement];
+    return conditionArray.map(condition => ({
+      condition: condition.condition,
+      operator: condition.operator,
+      measureThreshold: condition.measurethreshold ? parseFloat(condition.measurethreshold) : undefined,
+      referenceObjective: condition.referenceobjective || condition.referenceObjective,
+    }));
+  }
+
+  private extractLimitConditions(limitElement: any): any {
+    if (!limitElement) {
+      return undefined;
+    }
+
+    return {
+      attemptLimit: limitElement.attemptlimit ? parseInt(limitElement.attemptlimit) : undefined,
+      attemptAbsoluteDurationLimit: limitElement.attemptabsolutedurationlimit,
+      attemptExperiencedDurationLimit: limitElement.attemptexperienceddurationlimit,
+      activityAbsoluteDurationLimit: limitElement.activityabsolutedurationlimit,
+      activityExperiencedDurationLimit: limitElement.activityexperienceddurationlimit,
+      beginTimeLimit: limitElement.begintimelimit,
+      endTimeLimit: limitElement.endtimelimit,
+    };
+  }
+
+  private extractAuxiliaryResources(auxElement: any): any[] {
+    if (!auxElement) {
+      return [];
+    }
+
+    const auxArray = Array.isArray(auxElement) ? auxElement : [auxElement];
+    return auxArray.map(aux => ({
+      id: aux.id,
+      purpose: aux.purpose,
+      resourceIdentifier: aux.resourceidentifier || aux.resourceIdentifier,
+    }));
+  }
+
+  private extractRollupRules(rollupElement: any): any {
+    if (!rollupElement) {
+      return undefined;
+    }
+
+    return {
+      rollupRule: this.extractRollupRuleArray(rollupElement.rolluprule || rollupElement.rollupRule),
+    };
+  }
+
+  private extractRollupRuleArray(rulesElement: any): any[] {
+    if (!rulesElement) {
+      return [];
+    }
+
+    const rulesArray = Array.isArray(rulesElement) ? rulesElement : [rulesElement];
+    return rulesArray.map(rule => ({
+      objectiveRollup: this.parseBoolean(rule.objectiverollup || rule.objectiveRollup),
+      measureRollup: this.parseBoolean(rule.measurerollup || rule.measureRollup),
+      action: rule.action,
+      conditionCombination: rule.conditioncombination || rule.conditionCombination || "all",
+      conditions: this.extractRuleConditions(rule.conditions),
+    }));
+  }
+
+  private extractObjectives(objectivesElement: any): any {
+    if (!objectivesElement) {
+      return undefined;
+    }
+
+    return {
+      primaryObjective: this.extractObjective(objectivesElement.primaryobjective || objectivesElement.primaryObjective),
+      objective: this.extractObjectiveArray(objectivesElement.objective),
+    };
+  }
+
+  private extractObjective(objElement: any): any {
+    if (!objElement) {
+      return undefined;
+    }
+
+    return {
+      objectiveID: objElement.objectiveid || objElement.objectiveID,
+      satisfiedByMeasure: this.parseBoolean(objElement.satisfiedbymeasure || objElement.satisfiedByMeasure),
+      minNormalizedMeasure: objElement.minneasure ? parseFloat(objElement.minneasure) : undefined,
+      mapInfo: this.extractMapInfo(objElement.mapinfo || objElement.mapInfo),
+    };
+  }
+
+  private extractObjectiveArray(objElement: any): any[] {
+    if (!objElement) {
+      return [];
+    }
+
+    const objArray = Array.isArray(objElement) ? objElement : [objElement];
+    return objArray.map(obj => this.extractObjective(obj));
+  }
+
+  private extractMapInfo(mapElement: any): any[] {
+    if (!mapElement) {
+      return [];
+    }
+
+    const mapArray = Array.isArray(mapElement) ? mapElement : [mapElement];
+    return mapArray.map(map => ({
+      targetObjectiveID: map.targetobjectiveid || map.targetObjectiveID,
+      readSatisfiedStatus: this.parseBoolean(map.readsatisfiedstatus || map.readSatisfiedStatus),
+      readNormalizedMeasure: this.parseBoolean(map.readnormalizedmeasure || map.readNormalizedMeasure),
+      writeSatisfiedStatus: this.parseBoolean(map.writesatisfiedstatus || map.writeSatisfiedStatus),
+      writeNormalizedMeasure: this.parseBoolean(map.writenormalizedmeasure || map.writeNormalizedMeasure),
+    }));
+  }
+
+  private extractRandomizationControls(randomElement: any): any {
+    if (!randomElement) {
+      return undefined;
+    }
+
+    return {
+      randomizationTiming: randomElement.randomizationtiming || randomElement.randomizationTiming,
+      selectCount: randomElement.selectcount ? parseInt(randomElement.selectcount) : undefined,
+      reorderChildren: this.parseBoolean(randomElement.reorderchildren || randomElement.reorderChildren),
+      selectionTiming: randomElement.selectiontiming || randomElement.selectionTiming,
+    };
+  }
+
+  private extractDeliveryControls(deliveryElement: any): any {
+    if (!deliveryElement) {
+      return undefined;
+    }
+
+    return {
+      tracked: this.parseBoolean(deliveryElement.tracked),
+      completionSetByContent: this.parseBoolean(deliveryElement.completionsetbycontent || deliveryElement.completionSetByContent),
+      objectiveSetByContent: this.parseBoolean(deliveryElement.objectivesetbycontent || deliveryElement.objectiveSetByContent),
+    };
+  }
+
+  private extractConstrainedChoiceConsiderations(constrainedElement: any): any {
+    if (!constrainedElement) {
+      return undefined;
+    }
+
+    return {
+      preventActivation: this.parseBoolean(constrainedElement.preventactivation || constrainedElement.preventActivation),
+      constrainChoice: this.parseBoolean(constrainedElement.constrainchoice || constrainedElement.constrainChoice),
+    };
+  }
+
+  private extractRollupConsiderations(rollupElement: any): any {
+    if (!rollupElement) {
+      return undefined;
+    }
+
+    return {
+      requiredForSatisfied: rollupElement.requiredforsatisfied || rollupElement.requiredForSatisfied,
+      requiredForNotSatisfied: rollupElement.requiredfornotsatisfied || rollupElement.requiredForNotSatisfied,
+      requiredForCompleted: rollupElement.requiredforcompleted || rollupElement.requiredForCompleted,
+      requiredForIncomplete: rollupElement.requiredforincomplete || rollupElement.requiredForIncomplete,
+      measureSatisfactionIfActive: this.parseBoolean(rollupElement.measuresatisfactionifactive),
+    };
+  }
+
+  private extractPresentation(presentationElement: any): any {
+    if (!presentationElement) {
+      return undefined;
+    }
+
+    return {
+      navigationInterface: this.extractNavigationInterface(presentationElement.navigationinterface || presentationElement.navigationInterface),
+    };
+  }
+
+  private extractNavigationInterface(navElement: any): any {
+    if (!navElement) {
+      return undefined;
+    }
+
+    const hideLMSUI = navElement.hidelmsui || navElement.hideLMSUI;
+    return {
+      hideLMSUI: hideLMSUI ? (Array.isArray(hideLMSUI) ? hideLMSUI : [hideLMSUI]) : undefined,
+    };
+  }
+
+  private extractMetadata(metadataElement: any): any {
+    if (!metadataElement) {
+      return undefined;
+    }
+
+    return {
+      schema: metadataElement.schema,
+      schemaversion: metadataElement.schemaversion,
+      lom: metadataElement.lom,
+    };
+  }
+
+  private parseBoolean(value: any): boolean | undefined {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.toLowerCase() === "true";
+    }
+    return undefined;
   }
 }

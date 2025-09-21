@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // SCORM API Implementation
 
 import {
@@ -74,7 +75,8 @@ export class SCORMAPIImplementation implements SCORMAPI {
       return "false";
     }
 
-    this.dataModel[element as keyof SCORMDataModel] = value;
+    // Type assertion to allow assignment of string or undefined
+    (this.dataModel as any)[element] = value;
     this.errorCode = "0";
     return "true";
   }
@@ -156,47 +158,270 @@ export class SCORMAPIImplementation implements SCORMAPI {
   }
 
   private isValidElement(element: string): boolean {
-    const validElements = [
+    // SCORM 1.2 Elements
+    const scorm12Elements = [
+      "cmi.core._children",
+      "cmi.core.student_id",
+      "cmi.core.student_name",
+      "cmi.core.lesson_location",
+      "cmi.core.credit",
       "cmi.core.lesson_status",
+      "cmi.core.entry",
+      "cmi.core.score._children",
       "cmi.core.score.raw",
       "cmi.core.score.max",
       "cmi.core.score.min",
       "cmi.core.total_time",
-      "cmi.core.session_time",
-      "cmi.core.lesson_location",
-      "cmi.core.entry",
-      "cmi.core.exit",
-      "cmi.core.student_id",
-      "cmi.core.student_name",
-      "cmi.core.credit",
       "cmi.core.lesson_mode",
+      "cmi.core.exit",
+      "cmi.core.session_time",
       "cmi.suspend_data",
       "cmi.launch_data",
       "cmi.comments",
       "cmi.comments_from_lms",
+      "cmi.objectives._children",
+      "cmi.objectives._count",
+      "cmi.interactions._children",
+      "cmi.interactions._count",
+      "cmi.student_data._children",
+      "cmi.student_data.mastery_score",
+      "cmi.student_data.max_time_allowed",
+      "cmi.student_data.time_limit_action",
+      "cmi.student_preference._children",
+      "cmi.student_preference.audio",
+      "cmi.student_preference.language",
+      "cmi.student_preference.speed",
+      "cmi.student_preference.text",
+    ];
+
+    // SCORM 2004 Elements
+    const scorm2004Elements = [
+      "cmi._version",
       "cmi.completion_status",
-      "cmi.success_status",
-      "cmi.score.scaled",
-      "cmi.total_time",
-      "cmi.session_time",
-      "cmi.location",
+      "cmi.completion_threshold",
+      "cmi.credit",
       "cmi.entry",
       "cmi.exit",
+      "cmi.launch_data",
       "cmi.learner_id",
       "cmi.learner_name",
-      "cmi.credit",
+      "cmi.learner_preference._children",
+      "cmi.learner_preference.audio_level",
+      "cmi.learner_preference.language",
+      "cmi.learner_preference.delivery_speed",
+      "cmi.learner_preference.audio_captioning",
+      "cmi.location",
+      "cmi.max_time_allowed",
       "cmi.mode",
+      "cmi.objectives._children",
+      "cmi.objectives._count",
+      "cmi.progress_measure",
+      "cmi.scaled_passing_score",
+      "cmi.score._children",
+      "cmi.score.scaled",
+      "cmi.score.raw",
+      "cmi.score.min",
+      "cmi.score.max",
+      "cmi.session_time",
+      "cmi.success_status",
+      "cmi.suspend_data",
+      "cmi.time_limit_action",
+      "cmi.total_time",
+      "cmi.comments_from_learner._children",
+      "cmi.comments_from_learner._count",
+      "cmi.comments_from_lms._children",
+      "cmi.comments_from_lms._count",
+      "cmi.interactions._children",
+      "cmi.interactions._count",
+      "adl.nav.request",
+      "adl.nav.request_valid.continue",
+      "adl.nav.request_valid.previous",
+      "adl.nav.request_valid.choice",
+      "adl.nav.request_valid.jump",
     ];
-    return validElements.includes(element);
+
+    // Check dynamic elements (objectives and interactions with indices)
+    const dynamicPatterns = [
+      /^cmi\.objectives\.\d+\.(id|score\._children|score\.scaled|score\.raw|score\.min|score\.max|success_status|completion_status|progress_measure|description)$/,
+      /^cmi\.interactions\.\d+\.(id|type|objectives\._count|timestamp|correct_responses\._count|weighting|learner_response|result|latency|description)$/,
+      /^cmi\.interactions\.\d+\.objectives\.\d+\.id$/,
+      /^cmi\.interactions\.\d+\.correct_responses\.\d+\.pattern$/,
+      /^cmi\.comments_from_learner\.\d+\.(comment|location|timestamp)$/,
+      /^cmi\.comments_from_lms\.\d+\.(comment|location|timestamp)$/,
+    ];
+
+    const validElements =
+      this.version === "1.2" ? scorm12Elements : scorm2004Elements;
+
+    // Check static elements
+    if (validElements.includes(element)) {
+      return true;
+    }
+
+    // Check dynamic patterns for SCORM 2004
+    if (this.version === "2004") {
+      return dynamicPatterns.some((pattern) => pattern.test(element));
+    }
+
+    return false;
   }
 
   private isValidValue(element: string, value: string): boolean {
-    // Basic validation - in a real implementation, this would be more comprehensive
-    if (element.includes("score") && value !== "") {
+    // Comprehensive SCORM data validation
+
+    // Score validation
+    if (
+      element.includes("score.raw") ||
+      element.includes("score.max") ||
+      element.includes("score.min")
+    ) {
+      if (value === "") return true; // Empty values are valid for optional fields
       const num = parseFloat(value);
       return !isNaN(num) && isFinite(num);
     }
-    return true;
+
+    if (element.includes("score.scaled")) {
+      if (value === "") return true;
+      const num = parseFloat(value);
+      return !isNaN(num) && isFinite(num) && num >= -1 && num <= 1;
+    }
+
+    // Status validation
+    if (element === "cmi.core.lesson_status") {
+      const validStatuses = [
+        "passed",
+        "completed",
+        "failed",
+        "incomplete",
+        "browsed",
+        "not attempted",
+      ];
+      return validStatuses.includes(value);
+    }
+
+    if (element === "cmi.completion_status") {
+      const validStatuses = [
+        "completed",
+        "incomplete",
+        "not attempted",
+        "unknown",
+      ];
+      return validStatuses.includes(value);
+    }
+
+    if (element === "cmi.success_status") {
+      const validStatuses = ["passed", "failed", "unknown"];
+      return validStatuses.includes(value);
+    }
+
+    // Time validation (ISO 8601 duration format)
+    if (element.includes("time") && value !== "") {
+      // Basic time format validation - should be more comprehensive
+      const timePattern =
+        /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/;
+      return (
+        timePattern.test(value) || /^\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(value)
+      );
+    }
+
+    // Credit validation
+    if (element === "cmi.core.credit" || element === "cmi.credit") {
+      return ["credit", "no-credit"].includes(value);
+    }
+
+    // Mode validation
+    if (element === "cmi.core.lesson_mode" || element === "cmi.mode") {
+      return ["browse", "normal", "review"].includes(value);
+    }
+
+    // Entry validation
+    if (element === "cmi.core.entry" || element === "cmi.entry") {
+      return ["ab-initio", "resume", ""].includes(value);
+    }
+
+    // Exit validation
+    if (element === "cmi.core.exit" || element === "cmi.exit") {
+      const validExits =
+        this.version === "1.2"
+          ? ["time-out", "suspend", "logout", ""]
+          : ["time-out", "suspend", "logout", "normal", ""];
+      return validExits.includes(value);
+    }
+
+    // Progress measure validation (SCORM 2004)
+    if (element === "cmi.progress_measure") {
+      if (value === "") return true;
+      const num = parseFloat(value);
+      return !isNaN(num) && isFinite(num) && num >= 0 && num <= 1;
+    }
+
+    // Navigation request validation (SCORM 2004)
+    if (element === "adl.nav.request") {
+      const validRequests = [
+        "continue",
+        "previous",
+        "choice",
+        "exit",
+        "exitAll",
+        "abandon",
+        "abandonAll",
+      ];
+      return validRequests.includes(value);
+    }
+
+    // Boolean validation for navigation request valid elements
+    if (element.startsWith("adl.nav.request_valid.")) {
+      return ["true", "false", "unknown"].includes(value);
+    }
+
+    // Interaction type validation
+    if (element.includes("interactions.") && element.endsWith(".type")) {
+      const validTypes = [
+        "true-false",
+        "choice",
+        "fill-in",
+        "long-fill-in",
+        "matching",
+        "performance",
+        "sequencing",
+        "likert",
+        "numeric",
+        "other",
+      ];
+      return validTypes.includes(value);
+    }
+
+    // Interaction result validation
+    if (element.includes("interactions.") && element.endsWith(".result")) {
+      const validResults = ["correct", "incorrect", "unanticipated", "neutral"];
+      return validResults.includes(value) || /^[\d\.]+$/.test(value); // numeric result
+    }
+
+    // Audio captioning validation (SCORM 2004)
+    if (element === "cmi.learner_preference.audio_captioning") {
+      return ["-1", "0", "1"].includes(value);
+    }
+
+    // Time limit action validation
+    if (element === "cmi.time_limit_action") {
+      const validActions = [
+        "exit,message",
+        "exit,no message",
+        "continue,message",
+        "continue,no message",
+      ];
+      return validActions.includes(value);
+    }
+
+    // String length validation for suspend_data
+    if (element === "cmi.suspend_data") {
+      // SCORM 1.2: 4096 chars, SCORM 2004: 64000 chars
+      const maxLength = this.version === "1.2" ? 4096 : 64000;
+      return value.length <= maxLength;
+    }
+
+    // Default: allow any string value for other elements
+    return typeof value === "string";
   }
 
   // Public methods for external access
